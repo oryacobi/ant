@@ -1,5 +1,4 @@
 import importlib
-from pathlib import Path
 from typing import Any, Callable, ClassVar, Sequence
 from uuid import UUID, uuid4
 
@@ -15,14 +14,13 @@ from antonic import (
     AntDoc,
     AntIndex,
     DeleteResult,
+    InvalidAntConfigurationError,
     InvalidAntQueryError,
     OptimisticLockError,
-    UnsupportedAntCapabilityError,
     UpdateResult,
     default_collection_name,
 )
-from antonic.backends.mongo import MongoBackend
-from tests.fakes import FakeAsyncDatabase
+from tests.fakes import FakeAsyncMongoClient
 
 
 class User(AntDoc):
@@ -93,8 +91,16 @@ class FlexibleDoc(AntDoc):
     name: str
 
 
+@pytest.fixture(autouse=True)
+def fake_mongo_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeAsyncMongoClient.instances.clear()
+    monkeypatch.setattr("antonic.connector.AsyncMongoClient", FakeAsyncMongoClient)
+    monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.delenv("MONGODB_DATABASE", raising=False)
+
+
 def mongo_db() -> AntConnector:
-    return AntConnector(MongoBackend(FakeAsyncDatabase()))
+    return AntConnector("mongodb://localhost:27017/app")
 
 
 def test_default_collection_names_are_pluralized() -> None:
@@ -109,22 +115,92 @@ def test_old_package_and_public_names_are_not_available() -> None:
         importlib.import_module("ant")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("ant_mongo")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("antonic.backends.mongo")
 
     assert not hasattr(antonic, "AsyncMongoConnector")
+    assert not hasattr(antonic, "MongoBackend")
     assert not hasattr(antonic, "Entity")
     assert not hasattr(antonic, "IndexSpec")
     assert not hasattr(antonic, "EntityMeta")
     assert not hasattr(antonic, "EntityRegistry")
+    assert not hasattr(antonic, "UnsupportedAntCapabilityError")
 
 
-def test_core_source_does_not_import_mongo_packages() -> None:
-    core_root = Path(__file__).parents[1] / "src" / "antonic"
-    for path in core_root.glob("*.py"):
-        text = path.read_text()
-        assert "from pymongo" not in text
-        assert "import pymongo" not in text
-        assert "from bson" not in text
-        assert "import bson" not in text
+def test_connector_uses_direct_uri_database_and_client_options() -> None:
+    db = AntConnector(
+        "mongodb://localhost:27017/direct",
+        client_options={"appname": "antonic-tests"},
+    )
+
+    client = FakeAsyncMongoClient.instances[-1]
+    assert db.connection_string == "mongodb://localhost:27017/direct"
+    assert db.database_name == "direct"
+    assert db.database.name == "direct"
+    assert client.connection_string == "mongodb://localhost:27017/direct"
+    assert client.options == {"appname": "antonic-tests"}
+
+
+def test_connector_reads_mongodb_uri_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONGODB_URI", "mongodb://localhost:27017/env_db")
+
+    db = AntConnector()
+
+    assert db.connection_string == "mongodb://localhost:27017/env_db"
+    assert db.database_name == "env_db"
+
+
+def test_connector_uses_database_argument_when_uri_has_no_database() -> None:
+    db = AntConnector("mongodb://localhost:27017", database="argument_db")
+
+    assert db.database_name == "argument_db"
+
+
+def test_connector_uses_mongodb_database_env_when_uri_has_no_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONGODB_DATABASE", "env_database")
+
+    db = AntConnector("mongodb://localhost:27017")
+
+    assert db.database_name == "env_database"
+
+
+def test_uri_database_wins_over_database_argument_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONGODB_DATABASE", "env_database")
+
+    db = AntConnector("mongodb://localhost:27017/uri_database", database="argument_db")
+
+    assert db.database_name == "uri_database"
+
+
+def test_connector_requires_connection_string() -> None:
+    with pytest.raises(InvalidAntConfigurationError, match="MONGODB_URI"):
+        AntConnector()
+
+
+def test_connector_requires_database_name() -> None:
+    with pytest.raises(InvalidAntConfigurationError, match="MONGODB_DATABASE"):
+        AntConnector("mongodb://localhost:27017")
+
+
+@pytest.mark.asyncio
+async def test_close_closes_owned_mongo_client() -> None:
+    db = mongo_db()
+    client = FakeAsyncMongoClient.instances[-1]
+
+    assert client.closed is False
+    await db.close()
+
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_async_context_manager_closes_owned_mongo_client() -> None:
+    async with mongo_db() as db:
+        client = FakeAsyncMongoClient.instances[-1]
+        assert db.database_name == "app"
+        assert client.closed is False
+
+    assert client.closed is True
 
 
 def test_registry_resolves_lazy_metadata() -> None:
@@ -156,9 +232,16 @@ async def test_save_get_find_count_delete_round_trip() -> None:
     found = await db.get(User, str(user.id))
     assert found == user
 
-    active = await db.find(User, status="active", sort=[("created_at", DESCENDING)], limit=25)
+    active = await db.find(
+        User,
+        status="active",
+        sort=[("created_at", DESCENDING)],
+        limit=25,
+        mongo_options={"comment": "active users"},
+    )
     assert [item.email for item in active] == ["a@b.com"]
     assert db.collection(User).last_find_options["limit"] == 25
+    assert db.collection(User).last_find_options["comment"] == "active users"
 
     assert await db.count(User, status="active", limit=1000) == 1
     assert await db.delete(user) is True
@@ -287,7 +370,7 @@ async def test_custom_string_id_is_not_coerced_to_object_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plain_ant_doc_uses_object_ids_with_mongo_backend() -> None:
+async def test_plain_ant_doc_uses_object_ids_with_mongo() -> None:
     db = mongo_db()
 
     saved = await db.save(ObjectIdUser(email="a@b.com"))
@@ -352,18 +435,3 @@ async def test_update_validation_rejects_private_id_and_unsupported_operators() 
         await db.update_one(User, {"$set": {"_id": "not-public"}})
     with pytest.raises(InvalidAntQueryError):
         await db.update_one(User, {"$set": {"id": "immutable"}})
-
-
-@pytest.mark.asyncio
-async def test_aggregate_is_optional_backend_capability() -> None:
-    class NoAggregateBackend:
-        def collection(self, meta: Any) -> Any:
-            raise AssertionError("collection should not be called")
-
-        def raw_collection(self, name: str) -> Any:
-            raise AssertionError("raw_collection should not be called")
-
-    db = AntConnector(NoAggregateBackend())
-
-    with pytest.raises(UnsupportedAntCapabilityError):
-        await db.aggregate(User, [])

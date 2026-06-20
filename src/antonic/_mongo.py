@@ -12,7 +12,7 @@ from antonic.registry import AntDocMeta
 from antonic.results import DeleteResult, UpdateResult
 
 
-class MongoBackend:
+class _MongoAdapter:
     def __init__(self, database: Any) -> None:
         self.database = database
 
@@ -27,13 +27,13 @@ class MongoBackend:
         meta: AntDocMeta,
         document: Mapping[str, Any],
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         stored = dict(document)
         try:
             result = await self.collection(meta).insert_one(
                 self._to_mongo_document(meta, stored),
-                **self._options(backend_options),
+                **self._options(mongo_options),
             )
         except PyMongoDuplicateKeyError as exc:
             raise DuplicateAntDocError(str(exc)) from exc
@@ -50,14 +50,14 @@ class MongoBackend:
         *,
         upsert: bool = False,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> UpdateResult:
         try:
             result = await self.collection(meta).replace_one(
                 self._to_mongo_query(meta, filter),
                 self._to_mongo_document(meta, replacement),
                 **self._options(
-                    backend_options,
+                    mongo_options,
                     upsert=upsert,
                     sort=self._to_mongo_sort(sort),
                 ),
@@ -73,12 +73,12 @@ class MongoBackend:
         *,
         projection: Any = None,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any] | None:
         doc = await self.collection(meta).find_one(
             self._to_mongo_query(meta, filter),
             **self._options(
-                backend_options,
+                mongo_options,
                 projection=self._to_mongo_projection(projection),
                 sort=self._to_mongo_sort(sort),
             ),
@@ -94,12 +94,12 @@ class MongoBackend:
         sort: Any = None,
         limit: int | None = None,
         skip: int | None = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[Mapping[str, Any]]:
         cursor = self.collection(meta).find(
             self._to_mongo_query(meta, filter),
             **self._options(
-                backend_options,
+                mongo_options,
                 projection=self._to_mongo_projection(projection),
                 sort=self._to_mongo_sort(sort),
                 limit=limit,
@@ -118,14 +118,14 @@ class MongoBackend:
         upsert: bool = False,
         projection: Any = None,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any] | None:
         try:
             doc = await self.collection(meta).find_one_and_update(
                 self._to_mongo_query(meta, filter),
                 self._to_mongo_update(meta, update),
                 **self._options(
-                    backend_options,
+                    mongo_options,
                     projection=self._to_mongo_projection(projection),
                     sort=self._to_mongo_sort(sort),
                     upsert=upsert,
@@ -144,14 +144,14 @@ class MongoBackend:
         *,
         upsert: bool = False,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> UpdateResult:
         try:
             result = await self.collection(meta).update_one(
                 self._to_mongo_query(meta, filter),
                 self._to_mongo_update(meta, update),
                 **self._options(
-                    backend_options,
+                    mongo_options,
                     upsert=upsert,
                     sort=self._to_mongo_sort(sort),
                 ),
@@ -167,13 +167,13 @@ class MongoBackend:
         update: Mapping[str, Any],
         *,
         upsert: bool = False,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> UpdateResult:
         try:
             result = await self.collection(meta).update_many(
                 self._to_mongo_query(meta, filter),
                 self._to_mongo_update(meta, update),
-                **self._options(backend_options, upsert=upsert),
+                **self._options(mongo_options, upsert=upsert),
             )
         except PyMongoDuplicateKeyError as exc:
             raise DuplicateAntDocError(str(exc)) from exc
@@ -184,11 +184,11 @@ class MongoBackend:
         meta: AntDocMeta,
         filter: Mapping[str, Any],
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> DeleteResult:
         result = await self.collection(meta).delete_one(
             self._to_mongo_query(meta, filter),
-            **self._options(backend_options),
+            **self._options(mongo_options),
         )
         return DeleteResult(deleted_count=result.deleted_count)
 
@@ -197,11 +197,11 @@ class MongoBackend:
         meta: AntDocMeta,
         filter: Mapping[str, Any],
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> DeleteResult:
         result = await self.collection(meta).delete_many(
             self._to_mongo_query(meta, filter),
-            **self._options(backend_options),
+            **self._options(mongo_options),
         )
         return DeleteResult(deleted_count=result.deleted_count)
 
@@ -212,11 +212,11 @@ class MongoBackend:
         *,
         skip: int | None = None,
         limit: int | None = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> int:
         return await self.collection(meta).count_documents(
             self._to_mongo_query(meta, filter),
-            **self._options(backend_options, skip=skip, limit=limit),
+            **self._options(mongo_options, skip=skip, limit=limit),
         )
 
     async def distinct(
@@ -225,13 +225,13 @@ class MongoBackend:
         key: str,
         filter: Mapping[str, Any],
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> list[Any]:
         mongo_key = self._to_mongo_field(key)
         values = await self.collection(meta).distinct(
             mongo_key,
             self._to_mongo_query(meta, filter),
-            **self._options(backend_options),
+            **self._options(mongo_options),
         )
         if key == "id":
             return [self._from_mongo_id(meta, value) for value in values]
@@ -242,9 +242,9 @@ class MongoBackend:
         meta: AntDocMeta,
         pipeline: Sequence[Mapping[str, Any]],
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> list[Mapping[str, Any]]:
-        cursor = self.collection(meta).aggregate(list(pipeline), **self._options(backend_options))
+        cursor = self.collection(meta).aggregate(list(pipeline), **self._options(mongo_options))
         return [self._from_mongo_document(meta, doc) async for doc in cursor]
 
     async def ensure_indexes(
@@ -252,12 +252,12 @@ class MongoBackend:
         meta: AntDocMeta,
         indexes: Sequence[AntIndex],
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> list[str]:
         models = [self._to_index_model(meta, index) for index in indexes]
         if not models:
             return []
-        return await self.collection(meta).create_indexes(models, **self._options(backend_options))
+        return await self.collection(meta).create_indexes(models, **self._options(mongo_options))
 
     def _to_mongo_query(self, meta: AntDocMeta, query: Mapping[str, Any]) -> dict[str, Any]:
         validate_query(query)
@@ -267,9 +267,7 @@ class MongoBackend:
                 converted[key] = [self._to_mongo_query(meta, item) for item in value]
                 continue
             mongo_key = self._to_mongo_field(key)
-            converted[mongo_key] = (
-                self._to_mongo_id_filter(meta, value) if key == "id" else value
-            )
+            converted[mongo_key] = self._to_mongo_id_filter(meta, value) if key == "id" else value
         return converted
 
     def _to_mongo_update(self, meta: AntDocMeta, update: Mapping[str, Any]) -> dict[str, Any]:

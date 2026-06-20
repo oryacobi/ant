@@ -1,12 +1,21 @@
+import inspect
+import os
+from types import TracebackType
 from typing import Any, AsyncIterator, Mapping, Sequence, Type, TypeVar, overload
+from urllib.parse import unquote, urlsplit
 
-from antonic.backend import AntBackend
+from pymongo import AsyncMongoClient
+
+from antonic._mongo import _MongoAdapter
 from antonic.doc import AntDoc, utcnow
-from antonic.errors import AntDocNotFoundError, InvalidAntQueryError, OptimisticLockError, UnsupportedAntCapabilityError
+from antonic.errors import AntDocNotFoundError, InvalidAntConfigurationError, InvalidAntQueryError, OptimisticLockError
 from antonic.naming import CollectionNamingStrategy, default_collection_name
 from antonic.query import validate_projection, validate_query, validate_sort, validate_update
 from antonic.registry import AntDocMeta, AntDocRegistry
 from antonic.results import DeleteResult, UpdateResult
+
+MONGODB_URI_ENV = "MONGODB_URI"
+MONGODB_DATABASE_ENV = "MONGODB_DATABASE"
 
 T = TypeVar("T", bound=AntDoc)
 
@@ -14,13 +23,78 @@ T = TypeVar("T", bound=AntDoc)
 class AntConnector:
     def __init__(
         self,
-        backend: AntBackend,
-        naming_strategy: CollectionNamingStrategy = default_collection_name,
+        connection_string: str | None = None,
         *,
+        database: str | None = None,
+        client_options: Mapping[str, Any] | None = None,
+        naming_strategy: CollectionNamingStrategy = default_collection_name,
         strict_registration: bool = False,
     ) -> None:
-        self.backend = backend
+        self.connection_string = self._resolve_connection_string(connection_string)
+        self.database_name = self._resolve_database_name(self.connection_string, database)
+        self.client = AsyncMongoClient(self.connection_string, **dict(client_options or {}))
+        self.database = self.client[self.database_name]
+        self._mongo = _MongoAdapter(self.database)
         self.registry = AntDocRegistry(naming_strategy, strict=strict_registration)
+
+    async def __aenter__(self) -> "AntConnector":
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        result = self.client.close()
+        if inspect.isawaitable(result):
+            await result
+
+    @classmethod
+    def _resolve_connection_string(cls, connection_string: str | None) -> str:
+        if connection_string is None:
+            connection_string = os.environ.get(MONGODB_URI_ENV)
+        if connection_string is None:
+            raise InvalidAntConfigurationError(
+                f"MongoDB connection string required; pass connection_string or set {MONGODB_URI_ENV}"
+            )
+        connection_string = connection_string.strip()
+        if not connection_string:
+            raise InvalidAntConfigurationError(
+                f"MongoDB connection string required; pass connection_string or set {MONGODB_URI_ENV}"
+            )
+        return connection_string
+
+    @classmethod
+    def _resolve_database_name(cls, connection_string: str, database: str | None) -> str:
+        database_name = cls._database_from_connection_string(connection_string)
+        if database_name is None:
+            database_name = cls._clean_database_name(database)
+        if database_name is None:
+            database_name = cls._clean_database_name(os.environ.get(MONGODB_DATABASE_ENV))
+        if database_name is None:
+            raise InvalidAntConfigurationError(
+                f"MongoDB database required; include it in the URI path, pass database, "
+                f"or set {MONGODB_DATABASE_ENV}"
+            )
+        return database_name
+
+    @staticmethod
+    def _database_from_connection_string(connection_string: str) -> str | None:
+        path = urlsplit(connection_string).path
+        if not path or path == "/":
+            return None
+        return AntConnector._clean_database_name(unquote(path.strip("/")))
+
+    @staticmethod
+    def _clean_database_name(database: str | None) -> str | None:
+        if database is None:
+            return None
+        database = database.strip()
+        return database or None
 
     @overload
     def register(self, doc_type: Type[T]) -> AntDocMeta:
@@ -35,29 +109,29 @@ class AntConnector:
         return metas[0] if len(metas) == 1 else metas
 
     def collection(self, doc_type: Type[AntDoc]) -> Any:
-        return self.backend.collection(self.registry.resolve(doc_type))
+        return self._mongo.collection(self.registry.resolve(doc_type))
 
     def raw_collection(self, name: str) -> Any:
-        return self.backend.raw_collection(name)
+        return self._mongo.raw_collection(name)
 
     async def save(
         self,
         ant_doc: T,
         *,
         upsert: bool = False,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> T:
         meta = self.registry.resolve(type(ant_doc))
         if ant_doc.id is None or (meta.optimistic_lock and ant_doc.version == 0):
-            return await self.insert(ant_doc, backend_options=backend_options)
-        return await self.update(ant_doc, upsert=upsert, backend_options=backend_options, **where)
+            return await self.insert(ant_doc, mongo_options=mongo_options)
+        return await self.update(ant_doc, upsert=upsert, mongo_options=mongo_options, **where)
 
     async def insert(
         self,
         ant_doc: T,
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> T:
         meta = self.registry.resolve(type(ant_doc))
         now = utcnow()
@@ -72,10 +146,10 @@ class AntConnector:
             updates["version"] = 1
 
         next_doc = ant_doc.model_copy(update=updates)
-        stored = await self.backend.insert(
+        stored = await self._mongo.insert(
             meta,
             self._to_document(next_doc),
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
         if stored.get("id") is not None:
             next_doc = next_doc.model_copy(update={"id": stored["id"]})
@@ -87,7 +161,7 @@ class AntConnector:
         *,
         upsert: bool = False,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> T:
         if ant_doc.id is None:
@@ -107,13 +181,13 @@ class AntConnector:
             query["version"] = old_version
         validate_sort(sort)
 
-        result = await self.backend.replace_one(
+        result = await self._mongo.replace_one(
             meta,
             query,
             self._to_document(next_doc),
             upsert=upsert,
             sort=sort,
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
         if result.matched_count == 0 and result.upserted_id is None:
             if meta.optimistic_lock:
@@ -129,7 +203,7 @@ class AntConnector:
         *,
         projection: Any = None,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> T | None:
         query = self._query(doc_type, filter, where)
@@ -139,12 +213,12 @@ class AntConnector:
         validate_sort(sort)
 
         meta = self.registry.resolve(doc_type)
-        doc = await self.backend.find_one(
+        doc = await self._mongo.find_one(
             meta,
             validate_query(query),
             projection=projection,
             sort=sort,
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
         return None if doc is None else self._from_document(doc_type, doc)
 
@@ -157,7 +231,7 @@ class AntConnector:
         sort: Any = None,
         limit: int | None = None,
         skip: int | None = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> list[T]:
         return [
@@ -169,7 +243,7 @@ class AntConnector:
                 sort=sort,
                 limit=limit,
                 skip=skip,
-                backend_options=backend_options,
+                mongo_options=mongo_options,
                 **where,
             )
         ]
@@ -183,20 +257,20 @@ class AntConnector:
         sort: Any = None,
         limit: int | None = None,
         skip: int | None = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> AsyncIterator[T]:
         validate_projection(projection)
         validate_sort(sort)
         meta = self.registry.resolve(doc_type)
-        async for doc in self.backend.find(
+        async for doc in self._mongo.find(
             meta,
             self._query(doc_type, filter, where),
             projection=projection,
             sort=sort,
             limit=limit,
             skip=skip,
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         ):
             yield self._from_document(doc_type, doc)
 
@@ -211,7 +285,7 @@ class AntConnector:
         upsert: bool = False,
         projection: Any = None,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> T | None:
         self._ensure_patchable_changes(changes)
@@ -236,14 +310,14 @@ class AntConnector:
             update_doc["$inc"] = {"version": 1}
         update_doc = validate_update(update_doc)
 
-        doc = await self.backend.find_one_and_update(
+        doc = await self._mongo.find_one_and_update(
             meta,
             query,
             update_doc,
             upsert=upsert,
             projection=projection,
             sort=sort,
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
         return None if doc is None else self._from_document(doc_type, doc)
 
@@ -255,18 +329,18 @@ class AntConnector:
         *,
         upsert: bool = False,
         sort: Any = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> UpdateResult:
         validate_sort(sort)
         meta = self.registry.resolve(doc_type)
-        return await self.backend.update_one(
+        return await self._mongo.update_one(
             meta,
             self._query(doc_type, filter, where),
             validate_update(update),
             upsert=upsert,
             sort=sort,
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
 
     async def update_many(
@@ -276,23 +350,23 @@ class AntConnector:
         filter: Mapping[str, Any] | None = None,
         *,
         upsert: bool = False,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> UpdateResult:
         meta = self.registry.resolve(doc_type)
-        return await self.backend.update_many(
+        return await self._mongo.update_many(
             meta,
             self._query(doc_type, filter, where),
             validate_update(update),
             upsert=upsert,
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
 
     async def delete(
         self,
         ant_doc: AntDoc,
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> bool:
         if ant_doc.id is None:
@@ -300,7 +374,7 @@ class AntConnector:
         result = await self.delete_one(
             type(ant_doc),
             {"id": ant_doc.id},
-            backend_options=backend_options,
+            mongo_options=mongo_options,
             **where,
         )
         return result.deleted_count == 1
@@ -310,14 +384,14 @@ class AntConnector:
         doc_type: Type[T],
         filter: Mapping[str, Any] | None = None,
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> DeleteResult:
         meta = self.registry.resolve(doc_type)
-        return await self.backend.delete_one(
+        return await self._mongo.delete_one(
             meta,
             self._query(doc_type, filter, where),
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
 
     async def delete_many(
@@ -325,14 +399,14 @@ class AntConnector:
         doc_type: Type[T],
         filter: Mapping[str, Any] | None = None,
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> DeleteResult:
         meta = self.registry.resolve(doc_type)
-        return await self.backend.delete_many(
+        return await self._mongo.delete_many(
             meta,
             self._query(doc_type, filter, where),
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
 
     async def count(
@@ -342,16 +416,16 @@ class AntConnector:
         *,
         skip: int | None = None,
         limit: int | None = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> int:
         meta = self.registry.resolve(doc_type)
-        return await self.backend.count(
+        return await self._mongo.count(
             meta,
             self._query(doc_type, filter, where),
             skip=skip,
             limit=limit,
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
 
     async def distinct(
@@ -360,16 +434,16 @@ class AntConnector:
         key: str,
         filter: Mapping[str, Any] | None = None,
         *,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
         **where: Any,
     ) -> list[Any]:
         validate_projection([key])
         meta = self.registry.resolve(doc_type)
-        return await self.backend.distinct(
+        return await self._mongo.distinct(
             meta,
             key,
             self._query(doc_type, filter, where),
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
 
     async def aggregate(
@@ -378,16 +452,12 @@ class AntConnector:
         pipeline: Sequence[Mapping[str, Any]],
         *,
         as_type: Type[T] | None = None,
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> list[Any]:
-        aggregate = getattr(self.backend, "aggregate", None)
-        if aggregate is None:
-            raise UnsupportedAntCapabilityError("backend does not support aggregate")
-
-        rows = await aggregate(
+        rows = await self._mongo.aggregate(
             self.registry.resolve(doc_type),
             list(pipeline),
-            backend_options=backend_options,
+            mongo_options=mongo_options,
         )
         if as_type is None:
             return rows
@@ -396,16 +466,16 @@ class AntConnector:
     async def ensure_indexes(
         self,
         *doc_types: Type[AntDoc],
-        backend_options: Mapping[str, Any] | None = None,
+        mongo_options: Mapping[str, Any] | None = None,
     ) -> dict[Type[AntDoc], list[str]]:
         targets = doc_types or tuple(self.registry.registered_types())
         created: dict[Type[AntDoc], list[str]] = {}
         for doc_type in targets:
             meta = self.registry.resolve(doc_type)
-            created[doc_type] = await self.backend.ensure_indexes(
+            created[doc_type] = await self._mongo.ensure_indexes(
                 meta,
                 meta.indexes,
-                backend_options=backend_options,
+                mongo_options=mongo_options,
             )
         return created
 

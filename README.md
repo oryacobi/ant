@@ -4,7 +4,7 @@
 
 # antonic
 
-Backend-neutral persistence for Pydantic v2 AntDocs.
+MongoDB persistence for Pydantic v2 AntDocs.
 
 Antonic is in `0.1.x` alpha. The public package is named `antonic`, while the
 core model and metadata classes keep the Ant vocabulary: `AntDoc`,
@@ -16,22 +16,13 @@ core model and metadata classes keep the Ant vocabulary: `AntDoc`,
 pip install antonic
 ```
 
-Install the MongoDB backend extra when using `MongoBackend`:
-
-```bash
-pip install "antonic[mongo]"
-```
-
-AntDocs describe data and local persistence metadata. `AntConnector` owns
-document behavior, while a backend owns storage-specific translation:
+AntDocs describe data and local persistence metadata. `AntConnector` owns the
+MongoDB connection and document behavior:
 
 ```python
 from typing import ClassVar, Sequence
 
-from pymongo import AsyncMongoClient
-
 from antonic import ASCENDING, DESCENDING, AntConnector, AntDoc, AntIndex
-from antonic.backends.mongo import MongoBackend
 
 
 class User(AntDoc):
@@ -58,29 +49,30 @@ class Project(AntDoc):
 
 
 async def main() -> None:
-    client = AsyncMongoClient("mongodb://localhost:27017")
-    db = AntConnector(MongoBackend(client["app"]))
+    async with AntConnector("mongodb://localhost:27017/app") as db:
+        await db.ensure_indexes(User, Project)
 
-    await db.ensure_indexes(User, Project)
+        user = await db.save(User(email="a@b.com", name="Alice"))
+        found = await db.get(User, user.id)
+        active = await db.find(User, status="active", sort=[("created_at", -1)], limit=25)
 
-    user = await db.save(User(email="a@b.com", name="Alice"))
-    found = await db.get(User, user.id)
-    active = await db.find(User, status="active", sort=[("created_at", -1)], limit=25)
+        await db.patch(User, {"name": "Alice Cooper"}, id=user.id)
+        await db.delete(user)
 
-    await db.patch(User, {"name": "Alice Cooper"}, id=user.id)
-    await db.delete(user)
-
-    raw_users = db.collection(User)
-    await raw_users.find_one({"email": "a@b.com"})
+        raw_users = db.collection(User)
+        await raw_users.find_one({"email": "a@b.com"})
 ```
+
+If no connection string is passed, `AntConnector()` reads `MONGODB_URI`. The
+database name can come from the URI path, from `database=`, or from
+`MONGODB_DATABASE` when the URI has no database path.
 
 `filter={...}` accepts Ant's Mongo-like query DSL. Extra keyword arguments are
 equality filters, so use `filter={"limit": 10}` for document fields that collide
 with connector options.
 
-With `MongoBackend`, plain `AntDoc` ids default to MongoDB `ObjectId`
-values. You can pass either an `ObjectId` or its string form to connector
-methods that filter by `id`.
+Plain `AntDoc` ids default to MongoDB `ObjectId` values. You can pass either
+an `ObjectId` or its string form to connector methods that filter by `id`.
 
 Antonic requires Python 3.12 or newer.
 

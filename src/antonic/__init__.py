@@ -5,11 +5,11 @@ from antonic.errors import (
     AntDocNotFoundError,
     AntDocNotRegisteredError,
     DuplicateAntDocError,
+    InvalidAntConfigurationError,
     InvalidAntDocMetadataError,
     InvalidAntQueryError,
     OptimisticLockError,
     PersistenceError,
-    UnsupportedAntCapabilityError,
 )
 from antonic.index import AntIndex
 from antonic.naming import default_collection_name, simple_plural, snake_case
@@ -28,11 +28,11 @@ __all__ = [
     "AntIndex",
     "DeleteResult",
     "DuplicateAntDocError",
+    "InvalidAntConfigurationError",
     "InvalidAntDocMetadataError",
     "InvalidAntQueryError",
     "OptimisticLockError",
     "PersistenceError",
-    "UnsupportedAntCapabilityError",
     "UpdateResult",
     "default_collection_name",
     "simple_plural",

@@ -24,8 +24,28 @@ class FakeAsyncCursor:
         return deepcopy(item)
 
 
+class FakeAsyncMongoClient:
+    instances: list["FakeAsyncMongoClient"] = []
+
+    def __init__(self, connection_string: str, **options: Any) -> None:
+        self.connection_string = connection_string
+        self.options = dict(options)
+        self.databases: dict[str, FakeAsyncDatabase] = {}
+        self.closed = False
+        self.instances.append(self)
+
+    def __getitem__(self, name: str) -> "FakeAsyncDatabase":
+        if name not in self.databases:
+            self.databases[name] = FakeAsyncDatabase(name)
+        return self.databases[name]
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class FakeAsyncDatabase:
-    def __init__(self) -> None:
+    def __init__(self, name: str = "app") -> None:
+        self.name = name
         self.collections: dict[str, FakeAsyncCollection] = {}
 
     def __getitem__(self, name: str) -> "FakeAsyncCollection":

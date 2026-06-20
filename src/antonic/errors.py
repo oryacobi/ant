@@ -11,7 +11,7 @@ class AntDocNotRegisteredError(PersistenceError):
 
 
 class DuplicateAntDocError(PersistenceError):
-    """Raised when a backend rejects a write because of a duplicate key."""
+    """Raised when MongoDB rejects a write because of a duplicate key."""
 
 
 class AntDocNotFoundError(PersistenceError):
@@ -26,5 +26,5 @@ class InvalidAntQueryError(PersistenceError):
     """Raised when an Ant filter/update uses unsupported syntax."""
 
 
-class UnsupportedAntCapabilityError(PersistenceError):
-    """Raised when a backend does not support an optional Ant capability."""
+class InvalidAntConfigurationError(PersistenceError):
+    """Raised when Antonic cannot resolve required MongoDB configuration."""

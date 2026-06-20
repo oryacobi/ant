@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "antonic"
 version = "0.1.0"
-description = "Backend-neutral persistence for Pydantic AntDocs with a Mongo-like query DSL."
+description = "MongoDB persistence for Pydantic AntDocs with a Mongo-like query DSL."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -28,20 +28,15 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.11",
+    "pymongo>=4.11",
 ]
 
 [project.urls]
 Repository = "https://github.com/oryacobi/antonic"
 Issues = "https://github.com/oryacobi/antonic/issues"
 
-[project.optional-dependencies]
-mongo = [
-    "pymongo>=4.11",
-]
-
 [dependency-groups]
 dev = [
-    "pymongo>=4.11",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "twine>=6.0",
