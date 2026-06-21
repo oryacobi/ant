@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "antonic"
-version = "0.1.0"
+version = "0.1.1b1"
 description = "MongoDB persistence for Pydantic AntDocs with a Mongo-like query DSL."
 readme = "README.md"
 license = "Apache-2.0"
@@ -15,7 +15,7 @@ authors = [
 ]
 keywords = ["async", "documents", "mongodb", "persistence", "pydantic", "repository"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",

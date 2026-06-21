@@ -6,7 +6,7 @@
 
 MongoDB persistence for Pydantic v2 AntDocs.
 
-Antonic is in `0.1.x` alpha. The public package is named `antonic`, while the
+Antonic `0.1.1b1` is a beta pre-release. The public package is named `antonic`, while the
 core model and metadata classes keep the Ant vocabulary: `AntDoc`,
 `AntConnector`, `AntIndex`, `ant_collection`, and `ant_indexes`.
 
@@ -14,6 +14,19 @@ core model and metadata classes keep the Ant vocabulary: `AntDoc`,
 
 ```bash
 pip install antonic
+```
+
+To install the current beta pre-release explicitly:
+
+```bash
+pip install antonic==0.1.1b1
+```
+
+Pre-release versions are not selected by plain `pip install antonic` when a
+stable release is available. To allow pip to consider beta releases:
+
+```bash
+pip install --pre antonic
 ```
 
 AntDocs describe data and local persistence metadata. `AntConnector` owns the
